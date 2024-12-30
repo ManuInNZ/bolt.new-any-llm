@@ -1,10 +1,20 @@
 import { convertToCoreMessages, streamText as _streamText } from 'ai';
-import { getModel } from '~/lib/.server/llm/model';
 import { MAX_TOKENS } from './constants';
-import { getSystemPrompt } from './prompts';
-import { DEFAULT_MODEL, DEFAULT_PROVIDER, getModelList, MODEL_REGEX, PROVIDER_REGEX } from '~/utils/constants';
+import { getSystemPrompt } from '~/lib/common/prompts/prompts';
+import {
+  DEFAULT_MODEL,
+  DEFAULT_PROVIDER,
+  getModelList,
+  MODEL_REGEX,
+  MODIFICATIONS_TAG_NAME,
+  PROVIDER_LIST,
+  PROVIDER_REGEX,
+  WORK_DIR,
+} from '~/utils/constants';
 import ignore from 'ignore';
 import type { IProviderSetting } from '~/types/model';
+import { PromptLibrary } from '~/lib/common/prompt-library';
+import { allowedHTMLElements } from '~/utils/markdown';
 
 interface ToolResult<Name extends string, Args, Result> {
   toolCallId: string;
@@ -139,11 +149,16 @@ export async function streamText(props: {
   apiKeys?: Record<string, string>;
   files?: FileMap;
   providerSettings?: Record<string, IProviderSetting>;
+  promptId?: string;
+  contextOptimization?: boolean;
 }) {
-  const { messages, env, options, apiKeys, files, providerSettings } = props;
+  const { messages, env: serverEnv, options, apiKeys, files, providerSettings, promptId, contextOptimization } = props;
+
+  // console.log({serverEnv});
+
   let currentModel = DEFAULT_MODEL;
   let currentProvider = DEFAULT_PROVIDER.name;
-  const MODEL_LIST = await getModelList(apiKeys || {}, providerSettings);
+  const MODEL_LIST = await getModelList({ apiKeys, providerSettings, serverEnv: serverEnv as any });
   const processedMessages = messages.map((message) => {
     if (message.role === 'user') {
       const { model, provider, content } = extractPropertiesFromMessage(message);
@@ -156,9 +171,11 @@ export async function streamText(props: {
 
       return { ...message, content };
     } else if (message.role == 'assistant') {
-      const content = message.content;
+      let content = message.content;
 
-      // content = simplifyBoltActions(content);
+      if (contextOptimization) {
+        content = simplifyBoltActions(content);
+      }
 
       return { ...message, content };
     }
@@ -170,16 +187,27 @@ export async function streamText(props: {
 
   const dynamicMaxTokens = modelDetails && modelDetails.maxTokenAllowed ? modelDetails.maxTokenAllowed : MAX_TOKENS;
 
-  let systemPrompt = getSystemPrompt();
-  let codeContext = '';
+  const provider = PROVIDER_LIST.find((p) => p.name === currentProvider) || DEFAULT_PROVIDER;
 
-  if (files) {
-    codeContext = createFilesContext(files);
+  let systemPrompt =
+    PromptLibrary.getPropmtFromLibrary(promptId || 'default', {
+      cwd: WORK_DIR,
+      allowedHtmlElements: allowedHTMLElements,
+      modificationTagName: MODIFICATIONS_TAG_NAME,
+    }) ?? getSystemPrompt();
+
+  if (files && contextOptimization) {
+    const codeContext = createFilesContext(files);
     systemPrompt = `${systemPrompt}\n\n ${codeContext}`;
   }
 
   return _streamText({
-    model: getModel(currentProvider, currentModel, env, apiKeys, providerSettings) as any,
+    model: provider.getModelInstance({
+      model: currentModel,
+      serverEnv,
+      apiKeys,
+      providerSettings,
+    }),
     system: systemPrompt,
     maxTokens: dynamicMaxTokens,
     messages: convertToCoreMessages(processedMessages as any),
